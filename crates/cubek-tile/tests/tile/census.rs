@@ -16,17 +16,12 @@ use std::path::{Path, PathBuf};
 ///
 /// `RowChunks`, how a tiled stage's block lays its rows down, raised it by one: a caller states it.
 /// Its `CHUNK_BYTES`, what a padded row grows by, raised it by one more: a caller budgeting shared
-/// memory counts it.
-///
-/// The redesign merged three over the ceiling it set itself, while the suite was not running.
-/// The ceiling is the count it merged at.
-const PUB_ITEMS: usize = 766;
+/// memory counts it. The attention walk moving to its client and the resampling filters to
+/// cubek-interpolate took it down to 746.
+const PUB_ITEMS: usize = 746;
 /// Functions whose body runs past this many lines.
-///
-/// The stage row placement added two: `smem_backed`, which states the stage's placement beside its
-/// layout, and the manual mma's `load_manual`, which reads a col-major weight as it lies.
 const LONG_FN_LINES: usize = 60;
-const LONG_FNS: usize = 38;
+const LONG_FNS: usize = 33;
 /// Files longer than this, tests included.
 const LONG_FILE_LINES: usize = 500;
 const LONG_FILES: usize = 11;
@@ -36,9 +31,6 @@ const TOO_MANY_ARGUMENTS: usize = 27;
 
 /// Words the redesign retires, each checked as a whole identifier. A phase that deletes a concept
 /// moves its word here, and the count must be zero from then on.
-///
-/// Distribution is not here: the redesign's last phase made it the name of how a level's units
-/// share an axis (`AxisDistribution`, `Count::Distributed`).
 const RETIRED: &[&str] = &[
     "Fold",
     "FoldSeq",
@@ -50,6 +42,20 @@ const RETIRED: &[&str] = &[
     "unravel_const",
     "concat3",
     "within_2d",
+    // A level distributes its tiles over a compute scope ("distribution over deal"), and a
+    // plane is made of units, not lanes.
+    "Deal",
+    "Dealt",
+    "deal",
+    "dealt",
+    "deals",
+    "lane",
+    "lanes",
+    "Takers",
+    // A unit share reduces its partials; a stage's rows are arranged, not placed.
+    "fold_of",
+    "fold_mask",
+    "RowPlacement",
 ];
 
 #[test]
