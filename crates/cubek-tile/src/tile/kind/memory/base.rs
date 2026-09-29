@@ -10,7 +10,7 @@ use crate::*;
 /// A lifetime-erased buffer, its fixed `layout`, and the window this tile looks at.
 #[derive(CubeType, Clone)]
 #[expand(derive(Clone))]
-pub struct Memory<T: Numeric> {
+pub(crate) struct Memory<T: Numeric> {
     /// Which memory the bytes sit in.
     #[cube(comptime)]
     pub(crate) address: AddressSpace,
@@ -292,7 +292,7 @@ impl Overhang {
 
 /// Whether a read still proves its own bounds, stated by the reader.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Guard {
+pub(crate) enum Guard {
     /// Mask the overhang and apply the window's [`Boundary`] on every access.
     Checked,
     /// The reader proved its whole box is in bounds; reading past it is out of bounds, not masked.

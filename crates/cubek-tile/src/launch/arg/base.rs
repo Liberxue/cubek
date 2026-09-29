@@ -246,15 +246,20 @@ fn storage_of(
         .map(|storage| storage.contiguous_tiles(&geometry.extents(&labels)))
         .unwrap_or_default();
     let (space, levels) = (launch.space(), launch.partitioning().levels());
+    let kernel = launch.partitioning().space();
     let cuts_to = |level: usize, tile: &[(Axis, usize)]| {
         let leaf = space.leaf(&levels[..=level]);
-        axes.iter().all(|&axis| {
-            let stored = tile
-                .iter()
-                .find(|&&(a, _)| a == axis)
-                .map_or(1, |&(_, e)| e);
-            leaf.extent(axis) == stored
-        })
+        // A tile the kernel hands down dynamic is no window a storage tile can be, whatever
+        // this launch's extent makes it.
+        let fixed = kernel.leaf(&levels[..=level]);
+        axes.iter().all(|&axis| !fixed.is_dynamic(axis))
+            && axes.iter().all(|&axis| {
+                let stored = tile
+                    .iter()
+                    .find(|&&(a, _)| a == axis)
+                    .map_or(1, |&(_, e)| e);
+                leaf.extent(axis) == stored
+            })
     };
     let level = tiles
         .iter()
