@@ -7,6 +7,7 @@ use cubecl::{
     prelude::*,
 };
 
+use super::load_matrix::{LDMATRIX_ROW_BYTES, load_ldmatrix};
 use crate::*;
 
 // Per-role fragment register widths, bound at allocation via `scope.register_size` to match
@@ -122,15 +123,6 @@ impl<T: Numeric> MmaData<T> {
     /// ([`Manual`](LoadMethod::Manual) index math or the `ldmatrix` intrinsic). Takes the tile, not
     /// its store: the manual path reads through the quant-transparent matrix view, decoding here.
     pub(crate) fn load_window(&mut self, src: &Tile<T>) {
-        let element = src.stage_element();
-        let io = comptime!(self.io);
-        comptime!(assert!(
-            element == StageElement::Served
-                || (matches!(io.lhs_load_method, LoadMethod::Manual)
-                    && matches!(io.rhs_load_method, LoadMethod::Manual)),
-            "MmaData::load_window: the ldmatrix transport copies raw units, so it cannot unpack a \
-             packed source as it reads; decode it into a stage (`stage.copy_from(&w.mul(&scales))`)"
-        ));
         let m = comptime!(self.m);
         let n = comptime!(self.n);
         let k = comptime!(self.k);
@@ -230,12 +222,32 @@ fn load_fragment<T: Numeric, N: Size, A: Numeric, B: Numeric, CD: Numeric>(
     #[comptime] io: MmaIo,
     #[comptime] edges: (usize, usize),
 ) {
-    // Fall back to manual loading for gathered operands.
+    // `ldmatrix` reads 16-byte rows of 16-bit cells out of shared memory, for an operand: it
+    // serves a window only where every one of those holds, and the manual load serves the rest.
+    // A gathered window has no row a unit could address, a line wider than a row starts one
+    // inside it, a packed window holds its stored words, which its read decodes and `ldmatrix`
+    // would copy raw, and a global window, a 4-byte cell or the accumulator is not what the
+    // instruction reads at all.
     let gathered = src.gathered();
-    let method = comptime!(if gathered {
-        LoadMethod::Manual
-    } else {
-        io.load_method(ident)
+    let shared = src.is_shared();
+    let element = src.stage_element();
+    let holds_served_values = comptime!(element == StageElement::Served);
+    let served = src.vector_size();
+    // An element's size read at expansion, where the launch has registered it: inside
+    // `comptime!` the call would size the generic placeholder instead.
+    let elem_size = T::size().comptime();
+    let row_cells = comptime!(LDMATRIX_ROW_BYTES / elem_size);
+    let ldmatrix_serves = comptime!(
+        shared
+            && !gathered
+            && holds_served_values
+            && elem_size == 2
+            && ident != MatrixIdent::Accumulator
+            && row_cells.is_multiple_of(served)
+    );
+    let method = comptime!(match ldmatrix_serves {
+        true => io.load_method(ident),
+        false => LoadMethod::Manual,
     });
     match method {
         LoadMethod::Manual => {
@@ -243,10 +255,8 @@ fn load_fragment<T: Numeric, N: Size, A: Numeric, B: Numeric, CD: Numeric>(
             load_manual::<T, W, N, A, B, CD>(src, fragment, def, ident, layout, edges)
         }
         LoadMethod::LoadMatrix => {
-            comptime!(panic!(
-                "MmaData::load: the ldmatrix fast path is not yet wired for Memory windows; \
-                 state the register stage with MmaIo::manual()"
-            ))
+            let size!(W) = src.vector_size();
+            load_ldmatrix::<T, W, N, A, B, CD>(src, fragment, def, ident, layout, edges)
         }
     }
 }
