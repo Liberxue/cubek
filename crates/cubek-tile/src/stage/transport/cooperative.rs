@@ -2,6 +2,7 @@
 
 use cubecl::{prelude::*, std::tensor::layout::CoordsDyn};
 
+use super::async_copy::fill_lines_async;
 use super::padded::{read_stage_line, widened_shape};
 use crate::*;
 
@@ -84,7 +85,13 @@ impl<T: Numeric> Memory<T> {
                     check,
                 )
             };
-            fill_lines::<I2, WP2, WP2>(d, &s, &layout, total, total_c, fill, straight, padding);
+            // Only an equal-width fill moves each line whole, which is what the copy engine does
+            // ([`TransportKind::new`] refuses it any other).
+            if comptime!(src.access.delivery == Delivery::AsyncPerUnit) {
+                fill_lines_async::<I2, WP2>(d, &s, &layout, total, total_c, fill, straight);
+            } else {
+                fill_lines::<I2, WP2, WP2>(d, &s, &layout, total, total_c, fill, straight, padding);
+            }
         } else {
             let s = if comptime!(steps.is_empty()) {
                 Masked::new(

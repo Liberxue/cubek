@@ -673,6 +673,7 @@ impl<T: Numeric> Memory<T> {
                 write: self.access.write,
                 fill: self.access.fill,
                 storage: storage_below(self.access.storage, step.depth, &step.level, &space),
+                delivery: self.access.delivery,
             }),
             comptime!(UnitShare::new(&step.level, &space).under(self.unit_share)),
             // Per level: the level's space still has the axis the projection dropped.
@@ -850,6 +851,7 @@ impl<T: Numeric> Memory<T> {
                 write: self.access.write,
                 fill: self.access.fill,
                 storage: self.access.storage,
+                delivery: self.access.delivery,
             }),
             comptime!(self.unit_share),
             comptime!(self.split_share),

@@ -31,6 +31,8 @@ pub(crate) struct StagePlan {
     refills: Vec<Refill>,
     sync: Rendezvous,
     collective_full: bool,
+    commits: bool,
+    fences: bool,
     fillers: usize,
     owner: StageOwner,
 }
@@ -49,6 +51,8 @@ impl StagePlan {
         let fillers = level.fillers();
         let sync = Rendezvous::for_deliveries(&deliveries, fillers, owner);
         let collective_full = Rendezvous::collective_full(&deliveries);
+        let commits = Rendezvous::commits(&deliveries);
+        let fences = Rendezvous::fences(&deliveries);
         assert!(
             fillers == 0 || !collective_full,
             "Slot: a slot that mixes a cooperative fill with a bulk copy cannot be filled by \
@@ -69,6 +73,8 @@ impl StagePlan {
             refills,
             sync,
             collective_full,
+            commits,
+            fences,
             fillers,
             owner,
         }
@@ -90,6 +96,16 @@ impl StagePlan {
     /// Whether every unit of the cube arrives at a slot's fill.
     pub(crate) fn collective_full(&self) -> bool {
         self.collective_full
+    }
+
+    /// Whether a slot's units issue async copies its barrier must track.
+    pub(crate) fn commits(&self) -> bool {
+        self.commits
+    }
+
+    /// Whether a slot's barriers are fenced into the async proxy for a bulk copy.
+    pub(crate) fn fences(&self) -> bool {
+        self.fences
     }
 
     /// Planes that fill this walk's stages and take no tile.
@@ -138,7 +154,10 @@ mod tests {
         let (space, lhs, rhs) = spaces();
         let level = Level::every(&[(M, 8), (N, 8), (K, 4)]);
         let plan = StagePlan::new(
-            &[operand(Delivery::Copy, &lhs), operand(Delivery::Copy, &rhs)],
+            &[
+                operand(Delivery::SyncPerUnit, &lhs),
+                operand(Delivery::SyncPerUnit, &rhs),
+            ],
             &space,
             &level,
             StageOwner::Cube,
@@ -153,7 +172,10 @@ mod tests {
         let (space, lhs, rhs) = spaces();
         let level = Level::every(&[(M, 8), (N, 4), (K, 8)]);
         let plan = StagePlan::new(
-            &[operand(Delivery::Copy, &lhs), operand(Delivery::Copy, &rhs)],
+            &[
+                operand(Delivery::SyncPerUnit, &lhs),
+                operand(Delivery::SyncPerUnit, &rhs),
+            ],
             &space,
             &level,
             StageOwner::Cube,
@@ -188,7 +210,10 @@ mod tests {
             .filled_by(1)
             .level();
         StagePlan::new(
-            &[operand(Delivery::Tma, &lhs), operand(Delivery::Copy, &rhs)],
+            &[
+                operand(Delivery::Tma, &lhs),
+                operand(Delivery::SyncPerUnit, &rhs),
+            ],
             &space,
             &level,
             StageOwner::Cube,

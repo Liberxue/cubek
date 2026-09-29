@@ -15,7 +15,7 @@ pub(crate) enum Rendezvous {
     /// Every plane of the cube still has to reach the same count of them: a backend with no
     /// plane-wide barrier (WGSL) lowers `sync_plane` to the workgroup's.
     Plane,
-    /// Async bulk copy (TMA) over a `full`/`empty` mbarrier pair.
+    /// Async copy (TMA, `cp.async`) over a `full`/`empty` mbarrier pair.
     Barrier,
 }
 
@@ -40,8 +40,8 @@ impl Rendezvous {
                     && deliveries
                         .iter()
                         .all(|delivery| delivery.rendezvous() == Rendezvous::Cube),
-                "Slot: a stage one plane owns is filled by that plane's units alone, so neither a \
-                 bulk copy nor planes set aside to fill can deliver it"
+                "Slot: a stage one plane owns is filled by that plane's units alone, so neither an \
+                 async copy nor planes set aside to fill can deliver it"
             );
             return Rendezvous::Plane;
         }
@@ -63,9 +63,19 @@ impl Rendezvous {
 
     /// Whether a barrier slot needs every unit to publish its writes.
     pub(crate) fn collective_full(deliveries: &[Delivery]) -> bool {
-        deliveries
-            .iter()
-            .any(|delivery| delivery.rendezvous() == Rendezvous::Cube)
+        deliveries.iter().any(Delivery::every_unit_fills)
+    }
+
+    /// Whether a barrier slot's units copy asynchronously, which `full` must track before it flips.
+    pub(crate) fn commits(deliveries: &[Delivery]) -> bool {
+        deliveries.contains(&Delivery::AsyncPerUnit)
+    }
+
+    /// Whether a barrier slot's barriers must be fenced into the async proxy once initialized:
+    /// only a bulk copy completes on them from there. The fence is sm90+, so a slot without one
+    /// must not emit it.
+    pub(crate) fn fences(deliveries: &[Delivery]) -> bool {
+        deliveries.iter().any(Delivery::through_async_proxy)
     }
 }
 
@@ -90,6 +100,9 @@ pub(crate) enum Meeting {
         empty: Shared<Barrier>,
         /// Whether `full` counts every producer's arrival or only the elected issuer's.
         all_publish: bool,
+        /// Whether each producer hands `full` its async copies before it arrives, so the phase
+        /// waits for their bytes too ([`Delivery::AsyncPerUnit`]).
+        commits: bool,
         /// The unit that issues this slot's bulk copies and declares their bytes.
         elected: u32,
         /// `full`'s parity, flipped by the producer's release.
@@ -106,6 +119,8 @@ impl Meeting {
     pub(crate) fn new(
         #[comptime] sync: Rendezvous,
         #[comptime] collective_full: bool,
+        #[comptime] commits: bool,
+        #[comptime] fences: bool,
         #[comptime] fillers: usize,
     ) -> Meeting {
         match sync {
@@ -115,11 +130,13 @@ impl Meeting {
                 let full =
                     Barrier::shared(Meeting::producers(collective_full, fillers), UNIT_POS == 0);
                 let empty = Barrier::shared(Meeting::consumers(fillers), UNIT_POS == 0);
-                sync_async_proxy_shared();
+                if comptime!(fences) {
+                    sync_async_proxy_shared();
+                }
                 sync_cube();
                 let elected = Meeting::elected(fillers);
                 let all_publish = comptime!(collective_full || fillers > 0);
-                Meeting::new_Barrier(full, empty, all_publish, elected, 0, 0)
+                Meeting::new_Barrier(full, empty, all_publish, commits, elected, 0, 0)
             }
         }
     }
@@ -198,7 +215,7 @@ mod tests {
     fn procedural_and_strided_share_a_cube_pipeline() {
         assert_eq!(
             Rendezvous::for_deliveries(
-                &[Delivery::Procedural, Delivery::Copy],
+                &[Delivery::Procedural, Delivery::SyncPerUnit],
                 0,
                 StageOwner::Cube
             ),
@@ -218,6 +235,52 @@ mod tests {
         ]));
     }
 
+    /// An async copy lands after the fill returns, so only the barrier publishes it, and every
+    /// unit issued a share it has to hand over.
+    #[test]
+    fn an_async_copy_rendezvouses_on_a_barrier_every_unit_commits_to() {
+        let deliveries = [Delivery::AsyncPerUnit];
+        assert_eq!(
+            Rendezvous::for_deliveries(&deliveries, 0, StageOwner::Cube),
+            Rendezvous::Barrier
+        );
+        assert!(Rendezvous::collective_full(&deliveries));
+        assert!(Rendezvous::commits(&deliveries));
+        assert!(!Rendezvous::commits(&[
+            Delivery::Tma,
+            Delivery::SyncPerUnit
+        ]));
+    }
+
+    /// A bulk copy has one issuer, as TMA does: its bytes are counted on `full`, not handed over
+    /// by every unit.
+    #[test]
+    fn a_bulk_copy_keeps_its_single_producer_arrival() {
+        let deliveries = [Delivery::AsyncBulk];
+        assert_eq!(
+            Rendezvous::for_deliveries(&deliveries, 0, StageOwner::Cube),
+            Rendezvous::Barrier
+        );
+        assert!(!Rendezvous::collective_full(&deliveries));
+        assert!(!Rendezvous::commits(&deliveries));
+    }
+
+    /// Only a bulk copy completes on the barrier from the async proxy. `cp.async` stays in the
+    /// generic proxy, and the fence it would otherwise emit does not exist before sm90.
+    #[test]
+    fn only_a_bulk_copy_fences_the_barrier_into_the_async_proxy() {
+        assert!(Rendezvous::fences(&[Delivery::Tma]));
+        assert!(Rendezvous::fences(&[
+            Delivery::SyncPerUnit,
+            Delivery::AsyncBulk
+        ]));
+        assert!(!Rendezvous::fences(&[Delivery::AsyncPerUnit]));
+        assert!(!Rendezvous::fences(&[
+            Delivery::SyncPerUnit,
+            Delivery::Procedural
+        ]));
+    }
+
     #[test]
     fn pure_tma_keeps_its_single_producer_arrival() {
         assert!(!Rendezvous::collective_full(&[Delivery::Tma]));
@@ -226,7 +289,7 @@ mod tests {
     #[test]
     fn a_filled_slot_rendezvouses_on_a_barrier_whatever_delivered_it() {
         assert_eq!(
-            Rendezvous::for_deliveries(&[Delivery::Copy], 1, StageOwner::Cube),
+            Rendezvous::for_deliveries(&[Delivery::SyncPerUnit], 1, StageOwner::Cube),
             Rendezvous::Barrier
         );
     }
@@ -236,7 +299,7 @@ mod tests {
     fn a_planes_own_stage_rendezvouses_on_the_plane() {
         let owner = StageOwner::Plane { planes: 4 };
         assert_eq!(
-            Rendezvous::for_deliveries(&[Delivery::Procedural, Delivery::Copy], 0, owner),
+            Rendezvous::for_deliveries(&[Delivery::Procedural, Delivery::SyncPerUnit], 0, owner),
             Rendezvous::Plane
         );
     }
@@ -253,6 +316,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "filled by that plane's units alone")]
     fn a_planes_own_stage_takes_no_filling_planes() {
-        Rendezvous::for_deliveries(&[Delivery::Copy], 1, StageOwner::Plane { planes: 4 });
+        Rendezvous::for_deliveries(&[Delivery::SyncPerUnit], 1, StageOwner::Plane { planes: 4 });
     }
 }

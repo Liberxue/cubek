@@ -2,9 +2,10 @@
 
 use cubecl::zspace::SmallVec;
 
+use crate::Delivery;
 use crate::{Axis, Boundary, BoundaryPolicy, Field, Packing, Projection, Space, Storage};
 
-/// The comptime half of an operand: its axis mapping, edge checks, packing and storage.
+/// The comptime half of an operand: its axis mapping, edge checks, packing, storage and delivery.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TileSpec {
     /// How this operand's logical axes address its buffer's physical ones.
@@ -21,6 +22,8 @@ pub struct TileSpec {
     /// [`StoragePartitioning`](crate::StoragePartitioning) reads back. Empty for a plain buffer.
     /// What a load of it covers is the kernel's to pick ([`VectorTile::new`](crate::VectorTile::new)).
     pub stored_tiles: Vec<(Axis, usize)>,
+    /// Who moves this operand into a stage ([`delivery`](Self::delivery)).
+    pub delivery: Delivery,
 }
 
 impl TileSpec {
@@ -33,6 +36,7 @@ impl TileSpec {
             packing: Packing::Plain,
             storage: Storage::Strided,
             stored_tiles: Vec::new(),
+            delivery: Delivery::SyncPerUnit,
         }
     }
 
@@ -79,6 +83,27 @@ impl TileSpec {
         self.packing = Packing::Packed {
             field: field.into(),
         };
+        self
+    }
+
+    /// This spec with its stages moved by `delivery`: each unit its own lines, landed when the fill
+    /// returns or after it, or one unit the whole stage in bulk. The kernel does not change; the
+    /// fill does.
+    ///
+    /// # Panics
+    ///
+    /// [`Tma`](Delivery::Tma), which moves a tensor map rather than a tensor, and
+    /// [`Procedural`](Delivery::Procedural), which moves nothing.
+    pub fn delivery(mut self, delivery: Delivery) -> Self {
+        assert!(
+            matches!(
+                delivery,
+                Delivery::SyncPerUnit | Delivery::AsyncPerUnit | Delivery::AsyncBulk
+            ),
+            "TileSpec::delivery: a tensor is moved per unit or in bulk; {delivery:?} is a tensor \
+             map's or a coordinate tile's"
+        );
+        self.delivery = delivery;
         self
     }
 

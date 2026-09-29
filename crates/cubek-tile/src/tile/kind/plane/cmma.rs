@@ -218,6 +218,7 @@ mod fragment_drain_tests {
             write,
             fill: FillUnits::cube(0),
             storage: Storage::Strided,
+            delivery: Delivery::SyncPerUnit,
         }
     }
 

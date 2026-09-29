@@ -1,3 +1,4 @@
+mod async_copy;
 mod attention;
 mod blocked;
 mod census;

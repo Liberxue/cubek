@@ -6,7 +6,7 @@ use cubecl::prelude::*;
 
 use super::analysis::{Boundaries, Labels, Refusal};
 use crate::{
-    Axis, Boundary, Field, Geometry, Launcher, LineMisfit, Packing, Projection, Storage,
+    Axis, Boundary, Delivery, Field, Geometry, Launcher, LineMisfit, Packing, Projection, Storage,
     StoragePartitioning, TileArgLaunch, TileSpec, VectorTile,
 };
 
@@ -40,6 +40,8 @@ struct ArgData<'a> {
     width: usize,
     boundary: BoundaryPolicy,
     packing: Packing,
+    /// Who moves the operand into a stage ([`delivery`](Arg::delivery)).
+    delivery: Delivery,
     /// Whether the labelled dims bind in stride order ([`in_stride_order`](Arg::in_stride_order)).
     in_stride_order: bool,
 }
@@ -72,6 +74,7 @@ impl<'a> Arg<'a, Unlabelled> {
                 width: 1,
                 boundary: BoundaryPolicy::Derived,
                 packing: Packing::Plain,
+                delivery: Delivery::SyncPerUnit,
                 in_stride_order: false,
             },
             _state: PhantomData,
@@ -129,6 +132,13 @@ impl<'a> Arg<'a, Labelled> {
         self.data.packing = Packing::Packed {
             field: field.into(),
         };
+        self
+    }
+
+    /// Who moves this operand into a stage ([`SyncPerUnit`](Delivery::SyncPerUnit) unless
+    /// stated); the kernel is the same either way.
+    pub fn delivery(mut self, delivery: Delivery) -> Self {
+        self.data.delivery = delivery;
         self
     }
 
@@ -198,7 +208,9 @@ impl<'a> Arg<'a, Labelled> {
             packing: data.packing,
             storage,
             stored_tiles,
-        };
+            delivery: Delivery::SyncPerUnit,
+        }
+        .delivery(data.delivery);
         let tensor = data
             .binding
             .map(|binding| settled_tensor(binding, &geometry));

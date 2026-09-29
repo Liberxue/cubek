@@ -318,6 +318,8 @@ impl<T: Numeric> Memory<T> {
                     write,
                     fill,
                     storage: Storage::Strided,
+                    // Read as a source, a stage is copied out by the units that read it.
+                    delivery: Delivery::SyncPerUnit,
                 }),
                 unit_share: comptime!(UnitShare::Repeated),
                 split_share: comptime!(SplitShare::Whole),

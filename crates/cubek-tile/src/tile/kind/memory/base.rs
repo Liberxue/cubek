@@ -183,6 +183,9 @@ pub(crate) struct Access {
     pub fill: FillUnits,
     /// What the storage tiles are to this window.
     pub storage: Storage,
+    /// Who moves this tile's lines into a stage filled from it. Stated by the operand's spec and
+    /// carried down its windows; a stage copied onward is copied by its units.
+    pub delivery: Delivery,
 }
 
 /// The units that share a cooperative fill of a window: every unit of the cube, or the units of
