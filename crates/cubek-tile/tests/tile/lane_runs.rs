@@ -19,7 +19,8 @@ use cubecl_common::{e2m1, e4m3};
 use cubek_test_utils::{HostData, HostDataType, TestInput, TestOutcome, ValidationResult};
 use cubek_tile::{
     Axis, Instruction, Level, Levels, MmaOperands, Partitioning, Projection, Semiring, Space,
-    TileArg, TileArgLaunch, TileSpec, kind::Field, layout::PhysicalAxisMap, ops::matmul::MmaIo,
+    StageStorage, Stages, TileArg, TileArgLaunch, TileSpec, kind::Field, layout::PhysicalAxisMap,
+    ops::matmul::MmaIo,
 };
 use half::f16;
 
@@ -38,14 +39,17 @@ const WINDOW: usize = 128;
 const BLOCK: usize = 16;
 
 /// `c = a · b`, a leaf of `WINDOW` along `k` at a time, through the manual-mma instruction. An
-/// operand under block scales carries them.
+/// operand under block scales carries them. `a` read straight, or out of a stage in shared memory
+/// where `staged`.
 #[cube(launch)]
+#[allow(clippy::too_many_arguments)]
 fn lane_run_matmul<E: Numeric>(
     a: &TileArg<'_, E>,
     b: &TileArg<'_, E>,
     c: &TileArg<'_, f32>,
     space: Partitioning,
     #[comptime] level: Level,
+    #[comptime] staged: bool,
     #[define(E)] _dtype: ElemType,
 ) {
     let a = a.tile(&space);
@@ -60,9 +64,21 @@ fn lane_run_matmul<E: Numeric>(
         }),
         Semiring::SUM_PROD,
     );
-    for region in space.over(&level) {
-        let mut acc_r = acc.at(&region);
-        acc_r.mma(&a.at(&region), &b.at(&region));
+    if comptime!(staged) {
+        let walk = space.over(&level);
+        let mut stages = Stages::smem_single(&walk, &a, StageStorage::Strided, 1usize);
+        stages.pipelined(walk, |slot, region| {
+            let mut acc_r = acc.at(region);
+            let b_r = b.at(region);
+            slot.consume(|a_r| {
+                acc_r.mma(a_r, &b_r);
+            });
+        });
+    } else {
+        for region in space.over(&level) {
+            let mut acc_r = acc.at(&region);
+            acc_r.mma(&a.at(&region), &b.at(&region));
+        }
     }
     acc.drained_into(&c);
 }
@@ -165,6 +181,7 @@ fn check_plain(k: usize, width_a: usize, width_b: usize) {
         ),
         launcher.partitioning_arg(),
         launcher.partitioning().level(0),
+        false,
         f16::elem_type_native(),
     );
     let got = HostData::from_tensor_handle(&client, c, HostDataType::F32);
@@ -182,12 +199,20 @@ fn check_plain(k: usize, width_a: usize, width_b: usize) {
 /// two digits a block makes of it, `(KB, KI)`, so the scales are the operand omitting `KI`.
 /// `columns` fragments of eight columns share the plane, each contracting the one `a` it loads.
 fn check_nvfp4(k: usize, width_a: usize, words: usize, columns: usize) {
-    check_nvfp4_rows(16, k, width_a, words, columns)
+    check_nvfp4_rows(16, k, width_a, words, columns, false)
 }
 
 /// [`check_nvfp4`] at `rows` rows of the fragment's sixteen: a product of fewer rows overhangs
-/// the fragment, its rows past the edge read as zeros and drained nowhere.
-fn check_nvfp4_rows(rows: usize, k: usize, width_a: usize, words: usize, columns: usize) {
+/// the fragment, its rows past the edge read as zeros and drained nowhere. `a` read out of a
+/// stage in shared memory where `staged`, which holds the product's rows alone.
+fn check_nvfp4_rows(
+    rows: usize,
+    k: usize,
+    width_a: usize,
+    words: usize,
+    columns: usize,
+    staged: bool,
+) {
     let client = cubecl::test_device().client();
     if skip_without_instruction(&client) {
         return;
@@ -297,6 +322,7 @@ fn check_nvfp4_rows(rows: usize, k: usize, width_a: usize, words: usize, columns
         c_op.arg(),
         launcher.partitioning_arg(),
         launcher.partitioning().level(0),
+        staged,
         f16::elem_type_native(),
     );
     let got = HostData::from_tensor_handle(&client, c, HostDataType::F32);
@@ -313,8 +339,9 @@ fn check_nvfp4_rows(rows: usize, k: usize, width_a: usize, words: usize, columns
                 .sum()
         },
         &format!(
-            "nvfp4, k = {k}, a served {width_a} wide, codes {words} words a load, {columns} \
-             column fragments"
+            "nvfp4, {rows} rows, k = {k}, a served {width_a} wide{}, codes {words} words a \
+             load, {columns} column fragments",
+            if staged { " out of a stage" } else { "" }
         ),
     );
 }
@@ -387,6 +414,7 @@ fn check_plain_split(k: usize, width: usize) {
         c_op.arg(),
         launcher.partitioning_arg(),
         launcher.partitioning().level(0),
+        false,
         f16::elem_type_native(),
     );
     let got = HostData::from_tensor_handle(&client, c, HostDataType::F32);
@@ -447,9 +475,19 @@ fn column_fragments_share_one_lane_run_of_a() {
 /// read as zeros and drain nowhere.
 #[test]
 fn a_product_of_fewer_rows_overhangs_its_fragments() {
-    check_nvfp4_rows(3, 2 * WINDOW, 8, 2, 1);
-    check_nvfp4_rows(3, 2 * WINDOW, 8, 2, 2);
-    check_nvfp4_rows(9, WINDOW, 8, 2, 4);
+    check_nvfp4_rows(3, 2 * WINDOW, 8, 2, 1, false);
+    check_nvfp4_rows(3, 2 * WINDOW, 8, 2, 2, false);
+    check_nvfp4_rows(9, WINDOW, 8, 2, 4, false);
+}
+
+/// The activation out of a stage in shared memory, which holds the product's rows alone: the
+/// units covering rows past them read zeros rather than past the stage.
+#[test]
+fn a_staged_activation_of_fewer_rows_than_a_fragment_contracts_in_lane_runs() {
+    check_nvfp4_rows(1, 2 * WINDOW, 8, 2, 1, true);
+    check_nvfp4_rows(3, 2 * WINDOW, 8, 2, 2, true);
+    check_nvfp4_rows(9, WINDOW, 8, 2, 1, true);
+    check_nvfp4_rows(16, WINDOW, 8, 2, 1, true);
 }
 
 /// Each unit's register `i` of instruction role `ident` holds the cells the lane-run map says it
