@@ -265,10 +265,9 @@ pub struct Bound {
 
 impl Bound {
     /// The operand as the kernel's [`TileArg`](crate::TileArg) launch argument.
-    pub fn arg<E: Numeric, V: Size>(self) -> TileArgLaunch<'static, E, V> {
-        let Bound { spec, .. } = &self;
-        let spec = spec.clone();
-        TileArgLaunch::new(self.tensor(), spec)
+    pub fn arg<E: Numeric>(self) -> TileArgLaunch<'static, E> {
+        let (width, spec) = (self.bound_width(), self.spec.clone());
+        TileArgLaunch::new(self.tensor(), width, spec)
     }
 
     /// The tensor argument itself; panics for an operand built over geometry alone.
@@ -277,9 +276,10 @@ impl Bound {
             .expect("Bound: this operand was built over geometry alone and has no tensor to bind")
     }
 
-    /// The width the binding is typed at, narrower than `vector_size` when packed.
+    /// The width the binding is declared at, narrower than `vector_size` when packed: a packed
+    /// binding served fewer values a line than a word holds is still read a whole word at a time.
     pub fn bound_width(&self) -> usize {
-        self.spec.packing.physical(self.vector_size)
+        self.spec.packing.physical(self.vector_size).max(1)
     }
 }
 

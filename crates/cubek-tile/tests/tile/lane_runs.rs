@@ -18,9 +18,8 @@ use cubecl::{
 use cubecl_common::{e2m1, e4m3};
 use cubek_test_utils::{HostData, HostDataType, TestInput, TestOutcome, ValidationResult};
 use cubek_tile::{
-    Accumulate, AccumulateExpand, Axis, Instruction, Level, Levels, Partitioning, Projection,
-    Semiring, Space, TileArg, TileArgLaunch, TileSpec, kind::Field, layout::PhysicalAxisMap,
-    ops::matmul::MmaIo,
+    Axis, Instruction, Level, Levels, Partitioning, Projection, Semiring, Space, TileArg,
+    TileArgLaunch, TileSpec, kind::Field, layout::PhysicalAxisMap, ops::matmul::MmaIo,
 };
 use half::f16;
 
@@ -38,12 +37,13 @@ const WINDOW: usize = 128;
 /// Values one scale covers along `k`: NVFP4's block.
 const BLOCK: usize = 16;
 
-/// `c = a · b`, a leaf of `WINDOW` along `k` at a time, through the manual-mma instruction.
+/// `c = a · b`, a leaf of `WINDOW` along `k` at a time, through the manual-mma instruction. An
+/// operand under block scales carries them.
 #[cube(launch)]
-fn lane_run_matmul<E: Numeric, VA: Size, VB: Size>(
-    a: &TileArg<'_, E, VA>,
-    b: &TileArg<'_, E, VB>,
-    c: &TileArg<'_, f32, Const<1>>,
+fn lane_run_matmul<E: Numeric>(
+    a: &TileArg<'_, E>,
+    b: &TileArg<'_, E>,
+    c: &TileArg<'_, f32>,
     space: Partitioning,
     #[comptime] level: Level,
     #[define(E)] _dtype: ElemType,
@@ -51,7 +51,7 @@ fn lane_run_matmul<E: Numeric, VA: Size, VB: Size>(
     let a = a.tile(&space);
     let b = b.tile(&space);
     let c = c.tile(&space);
-    let acc = c.accumulator::<f32, E, E>(
+    let acc = c.accumulator::<f32>(
         &a,
         &b,
         comptime!(Instruction::Mma {
@@ -62,37 +62,6 @@ fn lane_run_matmul<E: Numeric, VA: Size, VB: Size>(
     for region in space.over(&level) {
         let mut acc_r = acc.at(&region);
         acc_r.mma(&a.at(&region), &b.at(&region));
-    }
-    acc.drained_into(&c);
-}
-
-/// [`lane_run_matmul`] against `e2m1` codes under `e4m3` block scales, both read as the words
-/// they are stored in.
-#[cube(launch)]
-fn lane_run_nvfp4_matmul<E: Numeric, VA: Size, VB: Size>(
-    a: &TileArg<'_, E, VA>,
-    b: &TileArg<'_, u32, VB>,
-    b_scales: &TileArg<'_, u32, Const<1>>,
-    c: &TileArg<'_, f32, Const<1>>,
-    space: Partitioning,
-    #[comptime] level: Level,
-    #[define(E)] _dtype: ElemType,
-) {
-    let a = a.tile(&space);
-    let b = b.tile_as::<E>(&space);
-    let b_scales = b_scales.tile_as::<f32>(&space);
-    let c = c.tile(&space);
-    let acc = c.accumulator::<f32, E, E>(
-        &a,
-        &b,
-        comptime!(Instruction::Mma {
-            io: MmaIo::manual()
-        }),
-        Semiring::SUM_PROD,
-    );
-    for region in space.over(&level) {
-        let mut acc_r = acc.at(&region);
-        acc_r.mma(&a.at(&region), &b.at(&region).mul(&b_scales.at(&region)));
     }
     acc.drained_into(&c);
 }
@@ -186,12 +155,11 @@ fn check_plain(k: usize, width_a: usize, width_b: usize) {
         &client,
         launcher.cube_count(),
         launcher.cube_dim(),
-        width_a,
-        width_b,
-        TileArgLaunch::new(tensor(a_handle, 16, k), TileSpec::direct(&[M, K])),
-        TileArgLaunch::new(tensor(b_handle, 8, k), TileSpec::direct(&[N, K])),
+        TileArgLaunch::new(tensor(a_handle, 16, k), width_a, TileSpec::direct(&[M, K])),
+        TileArgLaunch::new(tensor(b_handle, 8, k), width_b, TileSpec::direct(&[N, K])),
         TileArgLaunch::new(
             c.clone().binding().into_tensor_arg(),
+            1,
             TileSpec::direct(&[M, N]),
         ),
         launcher.partitioning_arg(),
@@ -319,15 +287,12 @@ fn check_nvfp4_rows(rows: usize, k: usize, width_a: usize, words: usize, columns
         .axes(&[M, N])
         .build()
         .unwrap();
-    lane_run_nvfp4_matmul::launch(
+    lane_run_matmul::launch(
         &client,
         launcher.cube_count(),
         launcher.cube_dim(),
-        a_op.bound_width(),
-        b_op.bound_width(),
         a_op.arg(),
-        b_op.arg(),
-        s_op.arg(),
+        b_op.arg().scales(s_op.arg()),
         c_op.arg(),
         launcher.partitioning_arg(),
         launcher.partitioning().level(0),
@@ -416,8 +381,6 @@ fn check_plain_split(k: usize, width: usize) {
         &client,
         launcher.cube_count(),
         launcher.cube_dim(),
-        a_op.bound_width(),
-        b_op.bound_width(),
         a_op.arg(),
         b_op.arg(),
         c_op.arg(),

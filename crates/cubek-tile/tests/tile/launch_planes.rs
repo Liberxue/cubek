@@ -37,9 +37,9 @@ const UNITS: usize = 2;
 /// `c += a · b`, every plane of the launch its tile.
 #[cube(launch)]
 fn launch_plane_matmul<O: Destination>(
-    a: &TileArg<'_, f32, Const<1>>,
-    b: &TileArg<'_, f32, Const<1>>,
-    c: &O::Arg<f32, Const<1>>,
+    a: &TileArg<'_, f32>,
+    b: &TileArg<'_, f32>,
+    c: &O::Arg<f32>,
     space: Partitioning,
 ) {
     let (a, b) = (a.tile(&space), b.tile(&space));
@@ -52,9 +52,9 @@ fn launch_plane_matmul<O: Destination>(
 /// `c += a · b`, every plane of every cube its tile: the control.
 #[cube(launch)]
 fn cube_plane_matmul<O: Destination>(
-    a: &TileArg<'_, f32, Const<1>>,
-    b: &TileArg<'_, f32, Const<1>>,
-    c: &O::Arg<f32, Const<1>>,
+    a: &TileArg<'_, f32>,
+    b: &TileArg<'_, f32>,
+    c: &O::Arg<f32>,
     space: Partitioning,
 ) {
     let (a, b) = (a.tile(&space), b.tile(&space));
@@ -82,10 +82,10 @@ fn count_walks(walks: &mut Tensor<f32>, space: Partitioning) {
 
 /// `plane`'s tile of `c += a · b`, every unit of it a block summed in registers.
 #[cube]
-fn plane_product(plane: &Region, a: &Tile<f32>, b: &Tile<f32>, c: &Tile<f32>) {
+fn plane_product(plane: &Region, a: &Tile, b: &Tile, c: &Tile) {
     for unit in plane {
         let (a_unit, b_unit, c_unit) = (a.at(&unit), b.at(&unit), c.at(&unit));
-        let sum = c_unit.accumulator::<f32, f32, f32>(
+        let sum = c_unit.accumulator::<f32>(
             &a_unit,
             &b_unit,
             comptime!(Instruction::Registers {
@@ -236,10 +236,12 @@ fn run(problem: Problem, planes: &Planes) -> Option<HostData> {
 
     let a_arg = TileArgLaunch::new(
         a_handle.binding().into_tensor_arg(),
+        1,
         TileSpec::direct(&[M, K]).boundary(policy),
     );
     let b_arg = TileArgLaunch::new(
         b_handle.binding().into_tensor_arg(),
+        1,
         TileSpec::direct(&[K, N]).boundary(policy),
     );
     let c_arg = Buffered::arg((bound, Write::Accumulate));
