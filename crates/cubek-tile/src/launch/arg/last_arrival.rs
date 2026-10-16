@@ -68,7 +68,7 @@ impl<'a> TileArg<'a> {
         let run = portion.run();
         let first_slot = 2 * first + select(portion.starts_in(i, first), 0usize, 1usize);
         let slots = self.tile(&boxes);
-        let _served = naming::<Served>(self.element);
+        let define!(Served) = self.element;
         let walk = boxes.walk();
         let own_box = walk.region(2 * run + select(portion.starts_in(i, run), 0usize, 1usize));
         let own = slots.at(&own_box);

@@ -13,7 +13,7 @@ use cubecl::std::tensor::{
     layout::{CoordsDyn, VirtualLayout, VirtualLayoutExpand},
     view::launch::{VirtualViewLayoutCompilationArg, VirtualViewLayoutLaunch},
 };
-use cubecl::unexpanded;
+use cubecl::{define_scalar, unexpanded};
 
 use crate::tile::packing::base::Packing;
 use crate::*;
@@ -160,7 +160,8 @@ pub struct TileArgExpand<'a> {
 #[derive(Clone)]
 enum ValuesExpand<'a> {
     Tensor {
-        tensor: &'a TensorExpand<Served>,
+        /// The values, kept at [`Held`] and named at their element where a tile reads them.
+        tensor: &'a TensorExpand<Held>,
         buffer: Value,
         meta: TensorMetaExpand,
         width: usize,
@@ -188,10 +189,15 @@ impl<'a> TileArgExpand<'a> {
         coefficients: CoordsExpand<u32>,
         offsets: CoordsExpand<i32>,
     ) -> TileExpand {
-        let ValuesExpand::Tensor { tensor, .. } = &self.values else {
+        let ValuesExpand::Tensor { tensor, meta, .. } = &self.values else {
             panic!("TileArg::tile_gathered: a gather reads a buffer; a tensor map lands boxes")
         };
-        let _served = Naming::<Served>::new(scope, self.element);
+        define_scalar!(Served);
+        let _served = scope.define_type::<Served>(self.element);
+        let tensor = scope.create_kernel_ref(TensorExpand::<Served>::__expand_from_parts(
+            *meta,
+            tensor.expand.into(),
+        ));
         let values = gathered_tile::expand::<Served>(
             scope,
             tensor,
@@ -212,10 +218,15 @@ impl<'a> TileArgExpand<'a> {
         let ComptimeOptionExpand::Some(table) = pages else {
             return self.__expand_tile_method(scope, partitioning);
         };
-        let ValuesExpand::Tensor { tensor, .. } = &self.values else {
+        let ValuesExpand::Tensor { tensor, meta, .. } = &self.values else {
             panic!("TileArg::tile_paged: a pool of pages is a buffer; a tensor map lands boxes")
         };
-        let _served = Naming::<Served>::new(scope, self.element);
+        define_scalar!(Served);
+        let _served = scope.define_type::<Served>(self.element);
+        let tensor = scope.create_kernel_ref(TensorExpand::<Served>::__expand_from_parts(
+            *meta,
+            tensor.expand.into(),
+        ));
         let values =
             paged_tile::expand::<Served>(scope, tensor, table, partitioning, self.spec.clone());
         self.scaling(scope, values, partitioning)
@@ -257,9 +268,14 @@ impl<'a> TileArgExpand<'a> {
 
     /// The values alone, under none of their scales.
     fn values_tile(&self, scope: &Scope, partitioning: &PartitioningExpand) -> TileExpand {
-        let _served = Naming::<Served>::new(scope, self.element);
+        define_scalar!(Served);
+        let _served = scope.define_type::<Served>(self.element);
         match &self.values {
-            ValuesExpand::Tensor { tensor, .. } => {
+            ValuesExpand::Tensor { tensor, meta, .. } => {
+                let tensor = scope.create_kernel_ref(TensorExpand::<Served>::__expand_from_parts(
+                    *meta,
+                    tensor.expand.into(),
+                ));
                 buffer_tile::expand::<Served>(scope, tensor, partitioning, self.spec.clone())
             }
             ValuesExpand::TensorMap { map, layout } => tensor_map_tile::expand::<Served>(
@@ -447,9 +463,9 @@ impl LaunchArg for TileArg<'static> {
                 };
                 let meta = TensorMeta::expand(&tensor.meta, builder);
                 let scope = &builder.scope;
-                let _served = Naming::<Served>::new(scope, arg.element);
+                let _held = scope.define_type::<Held>(arg.element);
                 let len = expand_buffer_length_native(scope, buffer);
-                let values = slice::from_raw_parts::<Served>(
+                let values = slice::from_raw_parts::<Held>(
                     scope,
                     buffer,
                     0usize.into_expand(scope),

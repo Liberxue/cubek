@@ -65,7 +65,7 @@ impl<'a> TileArg<'a> {
         let holders = Relay::holders(partitioning, split);
 
         let carry = self.tile(partitioning);
-        let _served = naming::<Served>(self.element);
+        let define!(Served) = self.element;
         let sink = adding_tile::<Served, V>(self, partitioning, turn == 0usize);
 
         Relay::<'t> {
